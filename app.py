@@ -1,31 +1,36 @@
 import os
 from flask import Flask, request, jsonify
 from database import db
-from models import Account, Device, License
+from models import Account, License, Device
 from utils import is_valid_key, parse_expiration_date, is_account_expired
-from datetime import datetime
 from dotenv import load_dotenv
 
-# Load .env variables
 load_dotenv()
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL")
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///auth.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")
-CLIENT_KEY = os.getenv("CLIENT_KEY")
+ADMIN_KEY = os.getenv('ADMIN_KEY')
+CLIENT_KEY = os.getenv('CLIENT_KEY')
 
-# ----------------------------
-# LOGIN ENDPOINT (CLIENT KEY)
-# ----------------------------
-@app.route("/login", methods=["GET"])
+# ---------------------------
+# Initialize DB automatically
+# ---------------------------
+@app.before_first_request
+def initialize_database():
+    db.create_all()
+
+# ---------------------------
+# LOGIN ENDPOINT
+# ---------------------------
+@app.route('/login', methods=['GET'])
 def login():
-    username = request.args.get("Username")
-    password = request.args.get("Password")
-    client_key = request.args.get("Key")
-    ip = request.remote_addr
+    username = request.args.get('Username')
+    password = request.args.get('Password')
+    client_key = request.args.get('Key')
+    ip_address = request.remote_addr
 
     if not is_valid_key(client_key, CLIENT_KEY):
         return jsonify({"status": "failure", "reason": "invalid client key"}), 401
@@ -33,15 +38,14 @@ def login():
     account = Account.query.filter_by(username=username, password=password).first()
     if not account:
         return jsonify({"status": "failure", "reason": "account not found"}), 404
-
     if is_account_expired(account):
         return jsonify({"status": "failure", "reason": "account expired"}), 403
 
-    device = Device.query.filter_by(account_id=account.id, ip_address=ip).first()
+    device = Device.query.filter_by(account_id=account.id, ip_address=ip_address).first()
     if not device:
         if len(account.devices) >= account.max_users:
             return jsonify({"status": "failure", "reason": "device limit reached"}), 403
-        new_device = Device(ip_address=ip, account_id=account.id, last_login=datetime.utcnow())
+        new_device = Device(ip_address=ip_address, account_id=account.id)
         db.session.add(new_device)
         db.session.commit()
 
@@ -51,17 +55,16 @@ def login():
         "created_date": account.created_date,
         "expiration_date": account.expiration_date,
         "devices": [d.ip_address for d in account.devices]
-    })
+    }), 200
 
-
-# ----------------------------
-# ADMIN ENDPOINTS (ADMIN KEY)
-# ----------------------------
-@app.route("/ShowAccountDetail", methods=["GET"])
+# ---------------------------
+# SHOW ACCOUNT DETAIL
+# ---------------------------
+@app.route('/ShowAccountDetail', methods=['GET'])
 def show_account_detail():
-    username = request.args.get("Username")
-    password = request.args.get("Password")
-    admin_key = request.args.get("Key")
+    username = request.args.get('Username')
+    password = request.args.get('Password')
+    admin_key = request.args.get('Key')
 
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
@@ -73,17 +76,18 @@ def show_account_detail():
     devices = [{"ip": d.ip_address, "last_login": d.last_login} for d in account.devices]
     return jsonify({
         "username": account.username,
-        "password": account.password,
         "created_date": account.created_date,
         "expiration_date": account.expiration_date,
         "max_users": account.max_users,
         "devices": devices
-    })
+    }), 200
 
-
-@app.route("/ShowAvailableAccounts", methods=["GET"])
+# ---------------------------
+# SHOW ALL ACCOUNTS
+# ---------------------------
+@app.route('/ShowAvailableAccounts', methods=['GET'])
 def show_available_accounts():
-    admin_key = request.args.get("Key")
+    admin_key = request.args.get('Key')
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
 
@@ -93,41 +97,41 @@ def show_available_accounts():
         result.append({
             "account_name": f"Account{acc.id}",
             "username": acc.username,
-            "password": acc.password,
             "expiration_date": acc.expiration_date,
             "devices": len(acc.devices)
         })
-    return jsonify({"accounts": result})
+    return jsonify({"accounts": result}), 200
 
-
-@app.route("/delete", methods=["DELETE"])
+# ---------------------------
+# DELETE ACCOUNT
+# ---------------------------
+@app.route('/delete', methods=['DELETE'])
 def delete_account():
-    account_name = request.args.get("AccountName")
-    admin_key = request.args.get("Key")
+    account_name = request.args.get('AccountName')  # e.g., "Account1"
+    admin_key = request.args.get('Key')
+    
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
 
-    try:
-        account_id = int(account_name.replace("Account", ""))
-    except:
-        return jsonify({"status": "invalid account name"}), 400
-
+    account_id = int(account_name.replace("Account", ""))
     account = Account.query.get(account_id)
     if not account:
         return jsonify({"status": "account not found"}), 404
-
+    
     db.session.delete(account)
     db.session.commit()
-    return jsonify({"status": "deleted"})
+    return jsonify({"status": "deleted"}), 200
 
-
-@app.route("/CreateAccount", methods=["POST"])
+# ---------------------------
+# CREATE ACCOUNT
+# ---------------------------
+@app.route('/CreateAccount', methods=['POST'])
 def create_account():
-    username = request.args.get("Username")
-    password = request.args.get("Password")
-    expiration_date = request.args.get("ExpirationDate")
-    max_users = int(request.args.get("MaxUser", 1))
-    admin_key = request.args.get("Key")
+    username = request.args.get('Username')
+    password = request.args.get('Password')
+    expiration_date = request.args.get('ExpirationDate')
+    max_users = int(request.args.get('MaxUser', 1))
+    admin_key = request.args.get('Key')
 
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
@@ -144,15 +148,17 @@ def create_account():
     )
     db.session.add(new_account)
     db.session.commit()
-    return jsonify({"status": "created", "account_name": f"Account{new_account.id}"})
+    return jsonify({"status": "created", "account_name": f"Account{new_account.id}"}), 201
 
-
-@app.route("/CreateLicense", methods=["POST"])
+# ---------------------------
+# CREATE LICENSE
+# ---------------------------
+@app.route('/CreateLicense', methods=['POST'])
 def create_license():
-    license_key = request.args.get("Licence")
-    expiration_date = request.args.get("ExpirationDate")
-    max_users = 1 if request.args.get("MAXUSER") == "ALWAYS" else int(request.args.get("MAXUSER", 1))
-    admin_key = request.args.get("AdminKey")
+    license_key = request.args.get('Licence')
+    expiration_date = request.args.get('ExpirationDate')
+    max_users = 1 if request.args.get('MAXUSER') == 'ALWAYS' else int(request.args.get('MAXUSER', 1))
+    admin_key = request.args.get('AdminKey')
 
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
@@ -168,13 +174,15 @@ def create_license():
     )
     db.session.add(new_license)
     db.session.commit()
-    return jsonify({"status": "license created"})
+    return jsonify({"status": "license created"}), 201
 
-
-@app.route("/DeleteLicense", methods=["DELETE"])
+# ---------------------------
+# DELETE LICENSE
+# ---------------------------
+@app.route('/DeleteLicense', methods=['DELETE'])
 def delete_license():
-    license_key = request.args.get("Licence")
-    admin_key = request.args.get("Key")
+    license_key = request.args.get('Licence')
+    admin_key = request.args.get('Key')
 
     if not is_valid_key(admin_key, ADMIN_KEY):
         return jsonify({"status": "unauthorized"}), 401
@@ -182,13 +190,13 @@ def delete_license():
     license = License.query.filter_by(license_key=license_key).first()
     if not license:
         return jsonify({"status": "license not found"}), 404
-
+    
     db.session.delete(license)
     db.session.commit()
-    return jsonify({"status": "license deleted"})
+    return jsonify({"status": "license deleted"}), 200
 
-
-if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-    app.run(debug=True)
+# ---------------------------
+# RUN APP
+# ---------------------------
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
